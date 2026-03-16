@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Iterable
+
+
+DEFAULT_LAUNCHER = "walker --dmenu -p {prompt}"
+DEFAULT_OPEN = "xdg-open"
+DEFAULT_INPUTAUTOMATIONTOOL = "ydotool type --file -"
+DEFAULT_COPY_ACTION_FIELD = "copy"
+DEFAULT_OPEN_URL_ACTION_FIELD = "open"
+DEFAULT_AUTOTYPE_ACTION_FIELD = "type"
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+CACHE_VERSION = 1
+
+
+@dataclass
+class Bookmark:
+    title: str
+    url: str
+    description: str
+    website_title: str
+    tag_names: list[str]
+
+    @property
+    def label(self) -> str:
+        parts = [self.title or self.website_title or self.url]
+        if self.tag_names:
+            parts.append(f"[{', '.join(self.tag_names)}]")
+        parts.append(self.url)
+        return "  ".join(parts)
+
+
+class LinkdingRequestError(RuntimeError):
+    pass
+
+
+def parse_args() -> argparse.Namespace:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config-file", default=os.environ.get("LINKMENU_CONFIG_FILE", default_config_file()))
+    bootstrap_args, _ = bootstrap.parse_known_args()
+    file_config = load_config_file(bootstrap_args.config_file)
+
+    parser = argparse.ArgumentParser(
+        description="List Linkding bookmarks in a dmenu-compatible launcher and open an action menu for the selected URL."
+    )
+    parser.add_argument(
+        "--config-file",
+        default=bootstrap_args.config_file,
+        help="path to the config file. Default: $XDG_CONFIG_HOME/linkmenu/linkmenu.conf",
+    )
+    parser.add_argument(
+        "--server",
+        default=resolve_setting(file_config, "LINKDING_URL"),
+        help="Linkding base URL, e.g. https://linkding.example.com",
+    )
+    parser.add_argument(
+        "--token",
+        default=resolve_setting(file_config, "LINKDING_TOKEN"),
+        help="Linkding API token",
+    )
+    parser.add_argument(
+        "--launcher",
+        default=resolve_setting(file_config, "LINKMENU_LAUNCHER", DEFAULT_LAUNCHER),
+        help="dmenu-compatible launcher command. Default: \"walker --dmenu -p {prompt}\"",
+    )
+    parser.add_argument(
+        "--inputautomation",
+        default=resolve_setting(file_config, "LINKMENU_INPUTAUTOMATIONTOOL", DEFAULT_INPUTAUTOMATIONTOOL),
+        help="input automation command that reads the text to type from stdin. Default: \"ydotool type --file -\"",
+    )
+    parser.add_argument(
+        "--open-command",
+        default=resolve_setting(file_config, "LINKMENU_OPEN", DEFAULT_OPEN),
+        help="browser command; if it contains {url}, that placeholder is replaced, otherwise the URL is appended. Default: \"xdg-open\"",
+    )
+    parser.add_argument(
+        "--copy-command",
+        default=resolve_setting(file_config, "LINKMENU_COPY", detect_copy_command()),
+        help="clipboard command that reads the URL from stdin. Will autodetect wl-copy, xclip, xsel or pbcopy",
+    )
+    parser.add_argument(
+        "--copy-action-field",
+        default=resolve_setting(file_config, "LINKMENU_COPY_ACTION_FIELD", DEFAULT_COPY_ACTION_FIELD),
+        help="copy action field content. Default: \"copy\""
+    )
+    parser.add_argument(
+        "--open-url-action-field",
+        default=resolve_setting(file_config, "LINKMENU_OPEN_URL_ACTION_FIELD", DEFAULT_OPEN_URL_ACTION_FIELD),
+        help="url opener action field content. Default: \"open\""
+    )
+    parser.add_argument(
+        "--autotype-action-field",
+        default=resolve_setting(file_config, "LINKMENU_AUTOTYPE_ACTION_FIELD", DEFAULT_AUTOTYPE_ACTION_FIELD),
+        help="autotype action field content. Default: \"type\""
+    )
+    parser.add_argument(
+        "--cache-file",
+        default=resolve_setting(file_config, "LINKMENU_CACHE_FILE", default_cache_file()),
+        help="path to the JSON cache file. Default: $XDG_CACHE_HOME/linkmenu/bookmarks.json",
+    )
+    parser.add_argument(
+        "--search",
+        default="",
+        help="Optional Linkding search query",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Optional maximum number of bookmarks to load; 0 means all. Default: 0",
+    )
+    return parser.parse_args()
+
+
+def require_config(args: argparse.Namespace) -> None:
+    missing = []
+    if not args.server:
+        missing.append("LINKDING_URL or --server")
+    if not args.token:
+        missing.append("LINKDING_TOKEN or --token")
+    if missing:
+        raise SystemExit(f"Missing configuration: {', '.join(missing)}")
+
+
+def fetch_bookmarks(server: str, token: str, search: str, limit: int, cache_file: str) -> list[Bookmark]:
+    try:
+        items = fetch_bookmark_items(server, token, search)
+        save_cached_items(cache_file, server, search, items)
+    except LinkdingRequestError as exc:
+        items = load_cached_items(cache_file, server, search)
+        if items is None:
+            raise SystemExit(str(exc)) from exc
+        print(f"{exc} Falling back to cached bookmarks.", file=sys.stderr)
+
+    return build_bookmarks(items, limit)
+
+
+def fetch_bookmark_items(server: str, token: str, search: str) -> list[dict]:
+    items: list[dict] = []
+    next_url = build_api_url(server, search)
+
+    while next_url:
+        payload = request_json(next_url, token)
+        items.extend(payload.get("results", []))
+        next_url = payload.get("next")
+
+    return items
+
+
+def build_bookmarks(items: list[dict], limit: int) -> list[Bookmark]:
+    bookmarks: list[Bookmark] = []
+    for item in items:
+        bookmarks.append(
+            Bookmark(
+                title=sanitize_title(item.get("title") or ""),
+                url=item.get("url") or "",
+                description=item.get("description") or "",
+                website_title=item.get("website_title") or "",
+                tag_names=item.get("tag_names") or [],
+            )
+        )
+        if limit and len(bookmarks) >= limit:
+            break
+    return bookmarks
+
+
+def build_api_url(server: str, search: str) -> str:
+    base = server.rstrip("/") + "/api/bookmarks/"
+    params = {"limit": "1000"}
+    if search:
+        params["q"] = search
+    return f"{base}?{urllib.parse.urlencode(params)}"
+
+
+def sanitize_title(title: str) -> str:
+    cleaned = ANSI_ESCAPE_RE.sub("", title)
+    cleaned = "".join(
+        char for char in cleaned if char.isprintable() or char in "\t ")
+    return " ".join(cleaned.split())
+
+
+def default_config_file() -> str:
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    if not config_home:
+        config_home = os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(config_home, "linkmenu", "linkmenu.conf")
+
+
+def default_cache_file() -> str:
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    if not cache_home:
+        cache_home = os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(cache_home, "linkmenu", "bookmarks.json")
+
+
+def load_config_file(path: str) -> dict[str, str]:
+    config: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for lineno, line in enumerate(handle, start=1):
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if stripped.startswith("export "):
+                    stripped = stripped[7:].lstrip()
+                if "=" not in stripped:
+                    raise SystemExit(f"Invalid config line {lineno} in {path}: {line.rstrip()}")
+                key, value = stripped.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                    value = value[1:-1]
+                value = os.path.expanduser(os.path.expandvars(value))
+                config[key] = value
+    except FileNotFoundError:
+        return {}
+    return config
+
+
+def resolve_setting(config: dict[str, str], key: str, default: str | None = None) -> str | None:
+    return os.environ.get(key, config.get(key, default))
+
+
+def cache_key(server: str, search: str) -> str:
+    normalized = f"{server.rstrip('/')}\n{search}"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def read_cache_document(cache_file: str) -> dict:
+    try:
+        with open(cache_file, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {"version": CACHE_VERSION, "queries": {}}
+    except json.JSONDecodeError:
+        return {"version": CACHE_VERSION, "queries": {}}
+
+    if not isinstance(data, dict):
+        return {"version": CACHE_VERSION, "queries": {}}
+
+    queries = data.get("queries")
+    if not isinstance(queries, dict):
+        queries = {}
+    return {"version": CACHE_VERSION, "queries": queries}
+
+
+def save_cached_items(cache_file: str, server: str, search: str, items: list[dict]) -> None:
+    cache = read_cache_document(cache_file)
+    key = cache_key(server, search)
+    entry = {
+        "server": server.rstrip("/"),
+        "search": search,
+        "items": items,
+    }
+    if cache["queries"].get(key) == entry and os.path.exists(cache_file):
+        return
+    cache["queries"][key] = entry
+
+    cache_dir = os.path.dirname(cache_file)
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
+    with open(cache_file, "w", encoding="utf-8") as handle:
+        json.dump(cache, handle, ensure_ascii=False)
+
+
+def load_cached_items(cache_file: str, server: str, search: str) -> list[dict] | None:
+    cache = read_cache_document(cache_file)
+    query = cache["queries"].get(cache_key(server, search))
+    if query and isinstance(query.get("items"), list):
+        return query["items"]
+    return None
+
+
+def detect_copy_command() -> str | None:
+    candidates = [
+        ("wl-copy", "wl-copy"),
+        ("xclip", "xclip -selection clipboard"),
+        ("xsel", "xsel --clipboard --input"),
+        ("pbcopy", "pbcopy"),
+    ]
+    for executable, command in candidates:
+        if shutil.which(executable):
+            return command
+    return None
+
+
+def request_json(url: str, token: str) -> dict:
+    request = urllib.request.Request(url, headers={"Authorization": f"Token {token}", "Accept": "application/json"})
+
+    try:
+        with urllib.request.urlopen(request) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise LinkdingRequestError(f"Linkding API request failed: HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise LinkdingRequestError(f"Linkding API request failed: {exc.reason}") from exc
+
+
+def run_launcher(command: str, bookmarks: Iterable[Bookmark], prompt: str) -> Bookmark | None:
+    entries = list(bookmarks)
+    if not entries:
+        return None
+
+    launcher_entries = format_launcher_entries(entries)
+    selection = run_menu(command, launcher_entries, prompt)
+    if not selection:
+        return None
+
+    try:
+        index = launcher_entries.index(selection)
+    except ValueError:
+        return None
+    return entries[index]
+
+
+def format_launcher_entries(bookmarks: list[Bookmark]) -> list[str]:
+    counts: dict[str, int] = {}
+    for bookmark in bookmarks:
+        counts[bookmark.label] = counts.get(bookmark.label, 0) + 1
+
+    seen: dict[str, int] = {}
+    formatted = []
+    for bookmark in bookmarks:
+        label = bookmark.label
+        if counts[label] > 1:
+            seen[label] = seen.get(label, 0) + 1
+            label = f"{label} ({seen[label]})"
+        formatted.append(label)
+    return formatted
+
+
+def run_menu(command: str, entries: list[str], prompt: str) -> str | None:
+    proc = subprocess.run(build_command(command, prompt=prompt), input="\n".join(entries) + "\n", text=True, capture_output=True)
+    if proc.returncode != 0:
+        return None
+    selection = proc.stdout.strip()
+    return selection or None
+
+
+def build_command(command: str, prompt: str | None = None, url: str | None = None) -> list[str]:
+    parts = shlex.split(command)
+    if prompt is not None:
+        parts = [part.replace("{prompt}", prompt) for part in parts]
+    if url is not None:
+        parts = [part.replace("{url}", url) for part in parts]
+    if url is not None and "{url}" not in command:
+        parts.append(url)
+    return parts
+
+
+def choose_action(command: str) -> str | None:
+    args = parse_args()
+    actions = [args.copy_action_field, args.open_url_action_field, args.autotype_action_field]
+    return run_menu(command, actions, "Link action…")
+
+
+def copy_text(command: str | None, text: str) -> None:
+    if not command:
+        raise SystemExit("No clipboard command configured. Set LINKMENU_COPY or use --copy-command.")
+
+    proc = subprocess.run(shlex.split(command), input=text, text=True, capture_output=True)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        raise SystemExit(stderr or f"copy command failed with exit code {proc.returncode}")
+
+
+def open_url(command: str, url: str) -> None:
+    proc = subprocess.run(build_command(command, url=url), text=True, capture_output=True)
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        raise SystemExit(stderr or f"open command failed with exit code {proc.returncode}")
+
+
+def autotype(command: str, text: str) -> None:
+    proc = subprocess.run(shlex.split(command), input=text, text=True, capture_output=True)
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        raise SystemExit(stderr or f"input automation command failed with exit code {proc.returncode}")
+
+
+def main() -> int:
+    args = parse_args()
+    require_config(args)
+
+    bookmarks = fetch_bookmarks(args.server, args.token, args.search, args.limit, args.cache_file)
+    selected = run_launcher(args.launcher, bookmarks, "Open Link…")
+    if not selected:
+        return 0
+
+    action = choose_action(args.launcher)
+    if not action:
+        return 0
+
+    if action == args.copy_action_field:
+        copy_text(args.copy_command, selected.url)
+    elif action == args.open_url_action_field:
+        open_url(args.open_command, selected.url)
+    elif action == args.autotype_action_field:
+        autotype(args.inputautomation, selected.url)
+    else:
+        raise SystemExit(f"Unknown action selected: {action}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
