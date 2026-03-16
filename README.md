@@ -1,13 +1,13 @@
 # linkmenu
 
-`linkmenu` loads bookmarks from a Linkding server through the REST API, shows them in a dmenu-compatible launcher, and then opens a second menu for the action: copy the link, open it in the browser, or type it with an input automation tool. The most recently fetched bookmarks are cached as JSON under `$XDG_CACHE_HOME/linkmenu/bookmarks.json` and reused when the server is unavailable.
+`linkmenu` loads bookmarks from a linkding server through the REST API, shows them in a dmenu-compatible launcher, and then opens a second menu for the action: copy the link, open it in the browser, or type it with an input automation tool. The most recently fetched bookmarks are cached as JSON under `$XDG_CACHE_HOME/linkmenu/bookmarks.json` and reused when the server is unavailable.
 
 ## Requirements
 
 - Python 3
 - a dmenu-compatible launcher such as `dmenu` or `walker --dmenu`
 - an input automation tool such as `xdotool` or `ydotool`
-- an API token from your Linkding server
+- an API token from your linkding server
 
 ## Configuration
 
@@ -64,16 +64,18 @@ $ sudo just install-global
 
 ```sh
 $ linkmenu -h
-usage: linkmenu [-h] [--config-file CONFIG_FILE] [--server SERVER] [--token TOKEN] [--launcher LAUNCHER] [--inputautomation INPUTAUTOMATION] [--open-command OPEN_COMMAND] [--copy-command COPY_COMMAND] [--copy-action-field COPY_ACTION_FIELD] [--open-url-action-field OPEN_URL_ACTION_FIELD] [--autotype-action-field AUTOTYPE_ACTION_FIELD] [--cache-file CACHE_FILE] [--search SEARCH] [--limit LIMIT]
+usage: linkmenu [-h] [--config-file CONFIG_FILE] [--server SERVER] [--token TOKEN] [--launcher LAUNCHER] [--inputautomation INPUTAUTOMATION] 
+                [--open-command OPEN_COMMAND] [--copy-command COPY_COMMAND] [--copy-action-field COPY_ACTION_FIELD] [--open-url-action-field OPEN_URL_ACTION_FIELD] 
+                [--autotype-action-field AUTOTYPE_ACTION_FIELD] [--cache-file CACHE_FILE] [--search SEARCH] [--limit LIMIT]
 
-List Linkding bookmarks in a dmenu-compatible launcher and open an action menu for the selected URL.
+List linkding bookmarks in a dmenu-compatible launcher and open an action menu for the selected URL.
 
 options:
   -h, --help            show this help message and exit
   --config-file CONFIG_FILE
                         path to the config file. Default: "$XDG_CONFIG_HOME/linkmenu/linkmenu.conf"
-  --server SERVER       Linkding base URL, e.g. https://linkding.example.com
-  --token TOKEN         Linkding API token
+  --server SERVER       linkding base URL, e.g. https://linkding.example.com
+  --token TOKEN         linkding API token
   --launcher LAUNCHER   dmenu-compatible launcher command. Default: "walker --dmenu -p {prompt}"
   --inputautomation INPUTAUTOMATION
                         input automation command that reads the text to type from stdin. Default: "ydotool type --file -"
@@ -89,7 +91,7 @@ options:
                         autotype action field content. Default: "type"
   --cache-file CACHE_FILE
                         path to the JSON cache file. Default: "$XDG_CACHE_HOME/linkmenu/bookmarks.json"
-  --search SEARCH       Optional Linkding search query
+  --search SEARCH       Optional linkding search query
   --limit LIMIT         Optional maximum number of bookmarks to load; 0 means all. Default: 0
 ```
 

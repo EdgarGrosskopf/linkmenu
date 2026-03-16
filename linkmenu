@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     file_config = load_config_file(bootstrap_args.config_file)
 
     parser = argparse.ArgumentParser(
-        description="List Linkding bookmarks in a dmenu-compatible launcher and open an action menu for the selected URL."
+        description="List linkding bookmarks in a dmenu-compatible launcher and open an action menu for the selected URL."
     )
     parser.add_argument(
         "--config-file",
@@ -64,12 +64,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--server",
         default=resolve_setting(file_config, "LINKDING_URL"),
-        help="Linkding base URL, e.g. https://linkding.example.com",
+        help="linkding base URL, e.g. https://linkding.example.com",
     )
     parser.add_argument(
         "--token",
         default=resolve_setting(file_config, "LINKDING_TOKEN"),
-        help="Linkding API token",
+        help="linkding API token",
     )
     parser.add_argument(
         "--launcher",
@@ -114,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--search",
         default="",
-        help="Optional Linkding search query",
+        help="Optional linkding search query",
     )
     parser.add_argument(
         "--limit",
@@ -305,9 +305,9 @@ def request_json(url: str, token: str) -> dict:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise LinkdingRequestError(f"Linkding API request failed: HTTP {exc.code}: {body}") from exc
+        raise LinkdingRequestError(f"linkding API request failed: HTTP {exc.code}: {body}") from exc
     except urllib.error.URLError as exc:
-        raise LinkdingRequestError(f"Linkding API request failed: {exc.reason}") from exc
+        raise LinkdingRequestError(f"linkding API request failed: {exc.reason}") from exc
 
 
 def run_launcher(command: str, bookmarks: Iterable[Bookmark], prompt: str) -> Bookmark | None:
