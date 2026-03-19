@@ -27,6 +27,7 @@ LINKMENU_COPY_ACTION_FIELD="copy"
 LINKMENU_OPEN_URL_ACTION_FIELD="open"
 LINKMENU_AUTOTYPE_ACTION_FIELD="type"
 LINKMENU_CACHE_FILE=$HOME/.cache/linkmenu/bookmarks.json
+LINKMENU_CONNECT_TIMEOUT=5000
 ```
 
 Environment variables override the config file. CLI flags override environment variables and the config file.
@@ -47,6 +48,8 @@ Environment variables override the config file. CLI flags override environment v
 
 `LINKMENU_CACHE_FILE` overrides the default JSON cache path.
 
+`LINKMENU_CONNECT_TIMEOUT` sets a request timeout in milliseconds. This is useful in case you encounter a big connection stall, since those will block the script from loading. Set it to `0` to disable the timeout.
+
 ## Installation
 
 Using `just`:
@@ -66,7 +69,7 @@ $ sudo just install-global
 $ linkmenu -h
 usage: linkmenu [-h] [--config-file CONFIG_FILE] [--server SERVER] [--token TOKEN] [--launcher LAUNCHER] [--inputautomation INPUTAUTOMATION] 
                 [--open-command OPEN_COMMAND] [--copy-command COPY_COMMAND] [--copy-action-field COPY_ACTION_FIELD] [--open-url-action-field OPEN_URL_ACTION_FIELD] 
-                [--autotype-action-field AUTOTYPE_ACTION_FIELD] [--cache-file CACHE_FILE] [--search SEARCH] [--limit LIMIT]
+                [--autotype-action-field AUTOTYPE_ACTION_FIELD] [--cache-file CACHE_FILE] [--connect-timeout CONNECT_TIMEOUT] [--search SEARCH] [--limit LIMIT]
 
 List linkding bookmarks in a dmenu-compatible launcher and open an action menu for the selected URL.
 
@@ -91,6 +94,8 @@ options:
                         autotype action field content. Default: "type"
   --cache-file CACHE_FILE
                         path to the JSON cache file. Default: "$XDG_CACHE_HOME/linkmenu/bookmarks.json"
+  --connect-timeout CONNECT_TIMEOUT
+                        request timeout in milliseconds. Set to 0 to disable. Default: 5000
   --search SEARCH       Optional linkding search query
   --limit LIMIT         Optional maximum number of bookmarks to load; 0 means all. Default: 0
 ```
@@ -104,5 +109,6 @@ linkmenu --launcher 'rofi -dmenu'
 linkmenu --open-command 'firefox {url}'
 linkmenu --copy-command 'xclip -selection clipboard'
 linkmenu --cache-file /tmp/linkmenu.json
+linkmenu --connect-timeout 3000
 linkmenu --config-file /tmp/linkmenu.conf
 ```

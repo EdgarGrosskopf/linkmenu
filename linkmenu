@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ from typing import Iterable
 DEFAULT_LAUNCHER = "walker --dmenu -p {prompt}"
 DEFAULT_OPEN = "xdg-open"
 DEFAULT_INPUTAUTOMATIONTOOL = "ydotool type --file -"
+DEFAULT_CONNECT_TIMEOUT_MS = 5000
 DEFAULT_COPY_ACTION_FIELD = "copy"
 DEFAULT_OPEN_URL_ACTION_FIELD = "open"
 DEFAULT_AUTOTYPE_ACTION_FIELD = "type"
@@ -112,6 +114,12 @@ def parse_args() -> argparse.Namespace:
         help="path to the JSON cache file. Default: $XDG_CACHE_HOME/linkmenu/bookmarks.json",
     )
     parser.add_argument(
+        "--connect-timeout",
+        type=int,
+        default=int(resolve_setting(file_config, "LINKMENU_CONNECT_TIMEOUT", str(DEFAULT_CONNECT_TIMEOUT_MS))),
+        help="request timeout in milliseconds. Set to 0 to disable. Default: 5000",
+    )
+    parser.add_argument(
         "--search",
         default="",
         help="Optional linkding search query",
@@ -135,9 +143,9 @@ def require_config(args: argparse.Namespace) -> None:
         raise SystemExit(f"Missing configuration: {', '.join(missing)}")
 
 
-def fetch_bookmarks(server: str, token: str, search: str, limit: int, cache_file: str) -> list[Bookmark]:
+def fetch_bookmarks(server: str, token: str, search: str, limit: int, cache_file: str, connect_timeout_ms: int) -> list[Bookmark]:
     try:
-        items = fetch_bookmark_items(server, token, search)
+        items = fetch_bookmark_items(server, token, search, connect_timeout_ms)
         save_cached_items(cache_file, server, search, items)
     except LinkdingRequestError as exc:
         items = load_cached_items(cache_file, server, search)
@@ -148,12 +156,12 @@ def fetch_bookmarks(server: str, token: str, search: str, limit: int, cache_file
     return build_bookmarks(items, limit)
 
 
-def fetch_bookmark_items(server: str, token: str, search: str) -> list[dict]:
+def fetch_bookmark_items(server: str, token: str, search: str, connect_timeout_ms: int) -> list[dict]:
     items: list[dict] = []
     next_url = build_api_url(server, search)
 
     while next_url:
-        payload = request_json(next_url, token)
+        payload = request_json(next_url, token, connect_timeout_ms)
         items.extend(payload.get("results", []))
         next_url = payload.get("next")
 
@@ -297,17 +305,33 @@ def detect_copy_command() -> str | None:
     return None
 
 
-def request_json(url: str, token: str) -> dict:
+def timeout_handler(_signum: int, _frame) -> None:
+    raise TimeoutError
+
+
+def request_json(url: str, token: str, connect_timeout_ms: int) -> dict:
     request = urllib.request.Request(url, headers={"Authorization": f"Token {token}", "Accept": "application/json"})
+    previous_handler = None
+    timeout_seconds = connect_timeout_ms / 1000 if connect_timeout_ms > 0 else None
 
     try:
-        with urllib.request.urlopen(request) as response:
+        if connect_timeout_ms > 0:
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             return json.load(response)
+    except TimeoutError as exc:
+        raise LinkdingRequestError(f"linkding API request timed out after {connect_timeout_ms}ms") from exc
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise LinkdingRequestError(f"linkding API request failed: HTTP {exc.code}: {body}") from exc
     except urllib.error.URLError as exc:
         raise LinkdingRequestError(f"linkding API request failed: {exc.reason}") from exc
+    finally:
+        if connect_timeout_ms > 0:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
 
 
 def run_launcher(command: str, bookmarks: Iterable[Bookmark], prompt: str) -> Bookmark | None:
@@ -396,7 +420,7 @@ def main() -> int:
     args = parse_args()
     require_config(args)
 
-    bookmarks = fetch_bookmarks(args.server, args.token, args.search, args.limit, args.cache_file)
+    bookmarks = fetch_bookmarks(args.server, args.token, args.search, args.limit, args.cache_file, args.connect_timeout)
     selected = run_launcher(args.launcher, bookmarks, "Open Link…")
     if not selected:
         return 0
